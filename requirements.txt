@@ -1,0 +1,4 @@
+boto3
+python-dateutil
+tabulate
+openai>=1.0
