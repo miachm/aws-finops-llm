@@ -38,7 +38,7 @@ if not os.getenv("OPENAI_API_KEY"):
     sys.exit(1)
 
 client = OpenAI()
-MODEL = "gpt-4o-mini"
+MODEL = "gpt-4.1-mini"
 
 _ce = boto3.client("ce", region_name="us-east-1")
 _cw = boto3.client("cloudwatch")
@@ -72,6 +72,7 @@ def _parse_date(s: str) -> dt.date:
 def query_cost_explorer(
         start_date: str | None = None,
         end_date:   str | None = None,
+        filters: dict | None = None,
         group_by_type: str | str = "DIMENSION",
         group_by_key: str | str = "SERVICE",
         granularity: str | str = "DAILY"
@@ -99,12 +100,21 @@ def query_cost_explorer(
         "End":   end_excl.strftime("%Y-%m-%d"),
     }
 
-    res = _ce.get_cost_and_usage(
-        TimePeriod=time_period,
-        Granularity=granularity,
-        Metrics=["BlendedCost"],
-        GroupBy=[{"Type": group_by_type, "Key": group_by_key}],
-    )
+    if filters is not None:
+        return _ce.get_cost_and_usage(
+            TimePeriod=time_period,
+            Granularity=granularity,
+            Filter=filters,
+            Metrics=["BlendedCost"],
+            GroupBy=[{"Type": group_by_type, "Key": group_by_key}],
+        )
+    else:
+        return _ce.get_cost_and_usage(
+            TimePeriod=time_period,
+            Granularity=granularity,
+            Metrics=["BlendedCost"],
+            GroupBy=[{"Type": group_by_type, "Key": group_by_key}],
+        )
 
     #rows = [
     #    {
@@ -116,6 +126,68 @@ def query_cost_explorer(
     #rows.sort(key=lambda r: r["cost_usd"], reverse=True)
     return res
 
+def query_cost_forecast(start_date: str, end_date: str, metric: str = "BLENDED_COST", granularity: str = "MONTHLY"):
+    return _ce.get_cost_forecast(
+        TimePeriod={"Start": start_date, "End": end_date},
+        Metric=metric,
+        Granularity=granularity,
+    )
+def query_usage_forecast(start_date: str, end_date: str, metric: str = "USAGE_QUANTITY", granularity: str = "DAILY"):
+    return _ce.get_usage_forecast(
+        TimePeriod={"Start": start_date, "End": end_date},
+        Metric=metric,
+        Granularity=granularity,
+    )
+
+def list_dimension_values(dimension: str, time_period: dict):
+    return _ce.get_dimension_values(
+        TimePeriod=time_period,
+        Dimension=dimension,
+    )
+
+def query_reservation_utilization(time_period: dict, granularity="MONTHLY"):
+    return _ce.get_reservation_utilization(
+        TimePeriod=time_period,
+        Granularity=granularity,
+    )
+def query_reservation_coverage(time_period: dict, granularity="MONTHLY"):
+    return _ce.get_reservation_coverage(
+        TimePeriod=time_period,
+        Granularity=granularity,
+    )
+
+def query_savings_plans_utilization(time_period: dict):
+    return _ce.get_savings_plans_utilization(TimePeriod=time_period)
+
+def query_savings_plans_coverage(time_period: dict):
+    return _ce.get_savings_plans_coverage(TimePeriod=time_period)
+
+def purchase_savings_plans_recommendation():
+    return _ce.get_savings_plans_purchase_recommendation()
+
+def reservation_purchase_recommendation():
+    return _ce.get_reservation_purchase_recommendation(
+        Service="AmazonEC2",
+        AccountScope="PAYER",
+        LookbackPeriodInDays="SIXTY_DAYS",
+        TermInYears="ONE_YEAR",
+        PaymentOption="NO_UPFRONT",
+    )
+
+def list_anomaly_monitors():
+    return _ce.describe_anomaly_monitors()
+
+def get_cost_anomalies(time_period: dict):
+    return _ce.get_anomalies(TimePeriod=time_period)
+
+def list_cost_categories():
+    return _ce.list_cost_category_definitions()
+
+def list_metrics(namespace: str, metric_name_prefix: str = None):
+    args = {"Namespace": namespace}
+    if metric_name_prefix:
+        args["MetricName"] = metric_name_prefix
+    return _cw.list_metrics(**args)
 
 def query_cloudwatch(metric: str, namespace: str, dimension_name: str, dimension_value: str, period: int = 300, window_hours: int = 1) -> Dict[str, Any]:
     end = _now()
@@ -157,6 +229,7 @@ FUNCTION_SCHEMAS: List[Dict[str, Any]] = [
             "properties": {
                 "start_date": {"type": "string", "description": "YYYY‑MM‑DD or month name"},
                 "end_date": {"type": "string", "description": "YYYY‑MM‑DD or month name"},
+                "filter": {"type": "object", "description": "Represents a filter to the get_cost_usage call. Ex: {\"Key\": \"SERVICE\", \"Values\": [\"EC2\"]}"},
                 "group_by_type": {"type": "string", "description": "Group results by a specific type", "default": "DIMENSION"},
                 "group_by_key": {"type": "string", "description": "Which key use in the group", "default": "SERVICE"},
                 "granularity": {"type": "string", "description": "Which time granularity use in the report", "default": "DAILY"}
@@ -180,6 +253,244 @@ FUNCTION_SCHEMAS: List[Dict[str, Any]] = [
         },
     },
     {
+        "name": "query_cost_forecast",
+        "description": "Get AWS cost forecast for a custom period",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "start_date": {
+                    "type": "string",
+                    "description": "YYYY-MM-DD start of forecast window"
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "YYYY-MM-DD end of forecast window"
+                },
+                "metric": {
+                    "type": "string",
+                    "description": "Which cost metric to forecast",
+                    "default": "BLENDED_COST"
+                },
+                "granularity": {
+                    "type": "string",
+                    "description": "Time grain of forecast",
+                    "default": "MONTHLY"
+                }
+            },
+            "required": ["start_date", "end_date"]
+        }
+    },
+    {
+        "name": "query_usage_forecast",
+        "description": "Get AWS usage forecast (e.g. EC2 hours) for a custom period",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "start_date": {
+                    "type": "string",
+                    "description": "YYYY-MM-DD start of usage forecast window"
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "YYYY-MM-DD end of usage forecast window"
+                },
+                "metric": {
+                    "type": "string",
+                    "description": "Which usage metric to forecast",
+                    "default": "USAGE_QUANTITY"
+                },
+                "granularity": {
+                    "type": "string",
+                    "description": "Time grain of usage forecast",
+                    "default": "DAILY"
+                }
+            },
+            "required": ["start_date", "end_date"]
+        }
+    },
+    {
+        "name": "list_dimension_values",
+        "description": "List possible values for a given Cost Explorer dimension",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "dimension": {
+                    "type": "string",
+                    "description": "Dimension name (e.g. SERVICE, REGION, TAG)"
+                },
+                "time_period": {
+                    "type": "object",
+                    "description": "TimePeriod dict with Start and End YYYY-MM-DD",
+                    "properties": {
+                        "Start": {"type": "string"},
+                        "End": {"type": "string"}
+                    },
+                    "required": ["Start", "End"]
+                }
+            },
+            "required": ["dimension", "time_period"]
+        }
+    },
+    {
+        "name": "query_reservation_utilization",
+        "description": "Get Reservation Utilization report for a time period",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "time_period": {
+                    "type": "object",
+                    "description": "TimePeriod dict with Start and End YYYY-MM-DD",
+                    "properties": {
+                        "Start": {"type": "string"},
+                        "End": {"type": "string"}
+                    },
+                    "required": ["Start", "End"]
+                },
+                "granularity": {
+                    "type": "string",
+                    "description": "Granularity of report",
+                    "default": "MONTHLY"
+                }
+            },
+            "required": ["time_period"]
+        }
+    },
+    {
+        "name": "query_reservation_coverage",
+        "description": "Get Reservation Coverage report for a time period",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "time_period": {
+                    "type": "object",
+                    "description": "TimePeriod dict with Start and End YYYY-MM-DD",
+                    "properties": {
+                        "Start": {"type": "string"},
+                        "End": {"type": "string"}
+                    },
+                    "required": ["Start", "End"]
+                },
+                "granularity": {
+                    "type": "string",
+                    "description": "Granularity of report",
+                    "default": "MONTHLY"
+                }
+            },
+            "required": ["time_period"]
+        }
+    },
+    {
+        "name": "query_savings_plans_utilization",
+        "description": "Get Savings Plans Utilization for a time period",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "time_period": {
+                    "type": "object",
+                    "description": "TimePeriod dict with Start and End YYYY-MM-DD",
+                    "properties": {
+                        "Start": {"type": "string"},
+                        "End": {"type": "string"}
+                    },
+                    "required": ["Start", "End"]
+                }
+            },
+            "required": ["time_period"]
+        }
+    },
+    {
+        "name": "query_savings_plans_coverage",
+        "description": "Get Savings Plans Coverage for a time period",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "time_period": {
+                    "type": "object",
+                    "description": "TimePeriod dict with Start and End YYYY-MM-DD",
+                    "properties": {
+                        "Start": {"type": "string"},
+                        "End": {"type": "string"}
+                    },
+                    "required": ["Start", "End"]
+                }
+            },
+            "required": ["time_period"]
+        }
+    },
+    {
+        "name": "purchase_savings_plans_recommendation",
+        "description": "Get AWS Savings Plans purchase recommendations",
+        "parameters": {
+            "type": "object",
+            "properties": {}
+        }
+    },
+    {
+        "name": "reservation_purchase_recommendation",
+        "description": "Get AWS Reserved Instances purchase recommendations",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "Service": {
+                    "type": "string",
+                    "description": "Service code, e.g. AmazonEC2"
+                },
+                "AccountScope": {
+                    "type": "string",
+                    "description": "PAYER or LINKED"
+                },
+                "LookbackPeriodInDays": {
+                    "type": "string",
+                    "description": "Look-back window, e.g. SIXTY_DAYS"
+                },
+                "TermInYears": {
+                    "type": "string",
+                    "description": "ONE_YEAR or THREE_YEARS"
+                },
+                "PaymentOption": {
+                    "type": "string",
+                    "description": "NO_UPFRONT, PARTIAL_UPFRONT, or ALL_UPFRONT"
+                }
+            },
+            "required": ["Service", "AccountScope", "LookbackPeriodInDays", "TermInYears", "PaymentOption"]
+        }
+    },
+    {
+        "name": "list_anomaly_monitors",
+        "description": "List all Cost Explorer anomaly monitors",
+        "parameters": {
+            "type": "object",
+            "properties": {}
+        }
+    },
+    {
+        "name": "get_cost_anomalies",
+        "description": "Retrieve cost anomalies for a given period",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "time_period": {
+                    "type": "object",
+                    "description": "TimePeriod dict with Start and End YYYY-MM-DD",
+                    "properties": {
+                        "Start": {"type": "string"},
+                        "End": {"type": "string"}
+                    },
+                    "required": ["Start", "End"]
+                }
+            },
+            "required": ["time_period"]
+        }
+    },
+    {
+        "name": "list_cost_categories",
+        "description": "List all defined Cost Categories",
+        "parameters": {
+            "type": "object",
+            "properties": {}
+        }
+    },
+    {
         "name": "rightsizing_recommendations",
         "description": "List potential rightsizing wins (demo stub).",
         "parameters": {"type": "object", "properties": {}},
@@ -200,9 +511,10 @@ messages: List[Dict[str, Any]] = [
         "role": "system",
         "content": (
             "You are a FinOps assistant for AWS.  "
-            "When the user asks questions about cost, "
-            "call the function 'query_cost_explorer' with the right date window.  "
-            "After tool calls, summarise the results clearly."
+            "You need to assist the user how to optimize the AWS bill, "
+            "You have some tools that you can use to retrieve information.  "
+            "You can call multiple tools per interaction. Summarize results from the tool when it makes sense"
+            "User might be interested in disglose specific charges."
         ),
     }
 ]
@@ -221,19 +533,6 @@ def run_agent(prompt: str, max_steps: int = 6) -> None:
 
                 messages.append({"role": "assistant", "content": "", "tool_calls": [tc]})
                 messages.append({"role": "tool", "tool_call_id": tc.id, "name": fn_name, "content": json.dumps(result)})
-
-                #if isinstance(result, dict) and "services" in result:
-                #    rows = [
-                #        {
-                #            "service": g["Keys"][0],
-                #            "cost_usd": round(float(g["Metrics"]["BlendedCost"]["Amount"]), 2),
-                #        }
-                #        for g in result["services"]["ResultsByTime"][0]["Groups"]
-                #    ]
-                #    rows.sort(key=lambda r: r["cost_usd"], reverse=True)
-                #    print(tabulate(rows[:5], headers="keys"))
-                #else:
-                #    print(json.dumps(result, indent=2))
         else:
             _hdr("Assistant response")
             print(msg.content)
